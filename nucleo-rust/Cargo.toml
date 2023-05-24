@@ -1,0 +1,30 @@
+[package]
+name = "nucleo-rust"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+embedded-hal = "0.2.7"
+nb = "1"
+cortex-m = "0.7.6"
+cortex-m-rt = "0.7.1"
+# Panic behaviour, see https://crates.io/keywords/panic-impl for alternatives
+panic-halt = "0.2.0"
+unwrap-infallible = "0.1.5"
+
+[dependencies.stm32f1xx-hal]
+version = "0.10.0"
+features = ["rt", "stm32f103", "medium"]
+
+[dev-dependencies]
+panic-halt = "0.2.0"
+panic-semihosting = "0.6.0"
+panic-itm = "0.4.2"
+cortex-m-rtic = "1.1.3"
+cortex-m-semihosting = "0.5.0"
+heapless = "0.7.16"
+usb-device = "0.2.8"
+usbd-serial = "0.1.1"
+unwrap-infallible = "0.1.5"
