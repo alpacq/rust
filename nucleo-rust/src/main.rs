@@ -14,19 +14,46 @@ use panic_halt as _;
 use nb::block;
 
 use cortex_m_rt::entry;
-use stm32f1xx_hal::{pac, prelude::*,serial::{self, Config, Serial, StopBits}};
+use stm32f1xx_hal::{pac::{self}, prelude::*, serial::{self, Config, Serial, StopBits}};
 use core::fmt::Write;
+use heapless::Vec;
 
-const MSG_MAX_LEN: usize = u8::MAX as usize;
+struct Command {
+    cmd: u8,
+    args: Vec<u8, 4>,
+    len: usize
+}
 
-fn receive_command<RX>(serial_rx: &mut RX, buf: &mut [u8; MSG_MAX_LEN]) -> usize
-    where RX: embedded_hal::serial::Read<u8, Error = serial::Error>
-{
-    enum RxState {
-        Length,
-        Data { len: usize, idx: usize },
+enum RxState {
+    Length,
+    Data { command: Command, idx: usize },
+}
+
+impl Command {
+    fn new(length: usize) -> Command {
+        Command {
+            len: length,
+            cmd: 0u8,
+            args: Vec::new()
+        }
     }
 
+    fn copy(&self, to: &mut Command) {
+        to.len = self.len;
+        to.cmd = self.cmd;
+        to.args = Vec::new();
+        for i in 0..self.args.len() {
+            to.args[i] = self.args[i];
+        }
+    }
+}
+
+// static mut RX: Option<Rx<pac::USART2>> = None;
+// static mut TX: Option<Tx<pac::USART2>> = None;
+
+fn receive_command<RX>(serial_rx: &mut RX, cmd: &mut Command) -> usize
+    where RX: embedded_hal::serial::Read<u8, Error = serial::Error>
+{
     let mut rx_phase = RxState::Length;
 
     loop {
@@ -40,8 +67,9 @@ fn receive_command<RX>(serial_rx: &mut RX, buf: &mut [u8; MSG_MAX_LEN]) -> usize
                     if cmd_length == 0 {
                         return 0;
                     }
+
                     rx_phase = RxState::Data {
-                        len: cmd_length as usize,
+                        command: Command::new(cmd_length as usize),
                         idx: 0,
                     };
                 } else {
@@ -49,11 +77,16 @@ fn receive_command<RX>(serial_rx: &mut RX, buf: &mut [u8; MSG_MAX_LEN]) -> usize
                 }
             }
 
-            RxState::Data { len, ref mut idx } => {
-                buf[*idx] = received as u8;
+            RxState::Data { ref mut command, ref mut idx } => {
+                if *idx == 0 {
+                    command.cmd = received as u8;
+                } else {
+                    command.args.push(received as u8).unwrap();
+                }
                 *idx += 1;
-                if *idx == len {
-                    return len;
+                if *idx == command.len {
+                    command.copy(cmd);
+                    return command.len;
                 }
             }
         }
@@ -91,14 +124,14 @@ fn main() -> ! {
 
     writeln!(serial.tx, "Please type characters to echo:\r\n").unwrap();
 
-    let mut buf = [0u8; MSG_MAX_LEN];
+    let mut current_command = Command::new(1);
 
     /* Endless loop */
     loop {
         // Receive message from master device.
-        let received_msg_len = receive_command(&mut serial.rx, &mut buf);
-        for i in 0..received_msg_len {
-            writeln!(serial.tx, "Inputted character is {}\r\n", buf[i]).unwrap();
+        let received_msg_len = receive_command(&mut serial.rx, &mut current_command);
+        for i in 0..received_msg_len - 1 {
+            writeln!(serial.tx, "Inputted character is {}\r\n", current_command.args[i]).unwrap();
         }
     }
 }
