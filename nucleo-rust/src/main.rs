@@ -9,42 +9,20 @@
 #![no_std]
 #![no_main]
 
-use panic_halt as _;
+mod command;
 
+use panic_halt as _;
 use cortex_m_rt::entry;
-use stm32f1xx_hal::{pac::{self, interrupt, USART2}, prelude::*, serial::{Config, Serial, StopBits, Tx, Rx}};
+use stm32f1xx_hal::{
+    pac::{self, interrupt, USART2},
+    prelude::*,
+    serial::{Config, Serial, StopBits, Tx, Rx},
+    i2c::{BlockingI2c, DutyCycle, Mode}, timer::Timer};
+use nb::block;
 use core::fmt::Write;
 use heapless::Vec;
-
-struct Command {
-    cmd: u8,
-    args: Vec<u8, 4>,
-    len: usize
-}
-
-enum RxState {
-    Length,
-    Data { command: Command, idx: usize },
-}
-
-impl Command {
-    fn new(length: usize) -> Command {
-        Command {
-            len: length,
-            cmd: 0u8,
-            args: Vec::new()
-        }
-    }
-
-    fn copy(&self, to: &mut Command) {
-        to.len = self.len;
-        to.cmd = self.cmd;
-        to.args = Vec::new();
-        for i in 0..self.args.len() {
-            to.args.push(self.args[i]).unwrap();
-        }
-    }
-}
+use command::{Command, RxState};
+use mcp9808::{MCP9808, reg_res::ResolutionVal, reg_temp_generic::ReadableTempRegister};
 
 static mut RX: Option<Rx<USART2>> = None;
 static mut TX: Option<Tx<USART2>> = None;
@@ -58,6 +36,12 @@ unsafe fn uart_command_response(command: &Command) {
         for i in 0..command.args.len() {
             writeln!(tx, "Argument {} is {}\r", i, command.args[i]).unwrap();
         }
+    }
+}
+
+unsafe fn uart_send_temp(temp: f32) {
+    if let Some(tx) = TX.as_mut() {
+        writeln!(tx, "Temperature is {}", temp).unwrap();
     }
 }
 
@@ -110,31 +94,42 @@ unsafe fn USART2() {
 
 #[entry]
 fn main() -> ! {
-    // Get access to the core peripherals from the cortex-m crate
-    let _cp = cortex_m::Peripherals::take().unwrap();
-    // Get access to the device specific peripherals from the peripheral access crate
+    let cp = cortex_m::Peripherals::take().unwrap();
     let dp = pac::Peripherals::take().unwrap();
-
-    // Take ownership over the raw flash and rcc devices and AFIO I/O registers and convert them into the corresponding
-    // HAL structs
     let mut flash = dp.FLASH.constrain();
     let rcc = dp.RCC.constrain();
     let mut afio = dp.AFIO.constrain();
-
-    // Freeze the configuration of all the clocks in the system and store the frozen frequencies in
-    // `clocks`
-    let clocks = rcc.cfgr.freeze(&mut flash.acr);
+    let clocks = rcc.cfgr.use_hse(8.MHz()).freeze(&mut flash.acr);
 
     let mut gpioa = dp.GPIOA.split();
+    let mut gpiob = dp.GPIOB.split();
 
-    let tx = gpioa.pa2.into_alternate_push_pull(&mut gpioa.crl);
-    let rx = gpioa.pa3;
+    let tx_pin = gpioa.pa2.into_alternate_push_pull(&mut gpioa.crl);
+    let rx_pin = gpioa.pa3;
     let mut serial = Serial::new(
         dp.USART2,
-        (tx, rx),
+        (tx_pin, rx_pin),
         &mut afio.mapr,
         Config::default().baudrate(115200.bps()).wordlength_8bits().parity_none().stopbits(StopBits::STOP1),
         &clocks
+    );
+
+    let scl_pin = gpiob.pb8.into_alternate_open_drain(&mut gpiob.crh);
+    let sda_pin = gpiob.pb9.into_alternate_open_drain(&mut gpiob.crh);
+    let _alert_pin = gpioa.pa9;
+    let i2c = BlockingI2c::i2c1(
+        dp.I2C1,
+        (scl_pin, sda_pin),
+        &mut afio.mapr,
+        Mode::Fast {
+            frequency: 400.kHz(),
+            duty_cycle: DutyCycle::Ratio16to9,
+        },
+        clocks,
+        1000,
+        10,
+        1000,
+        1000
     );
 
     serial.tx.listen();
@@ -151,7 +146,18 @@ fn main() -> ! {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
 
+    let mut timer = Timer::syst(cp.SYST, &clocks).counter_hz();
+    timer.start(1.Hz()).unwrap();
+
+    let mut mcp9808 = MCP9808::new(i2c);
+    let mut temp = mcp9808.read_temperature().unwrap();
+    let mut celsius = temp.get_celcius(ResolutionVal::Deg_0_0625C);
+    unsafe { uart_send_temp(celsius); }
+
     loop {
-        cortex_m::asm::wfi()
+        block!(timer.wait()).unwrap();
+        temp = mcp9808.read_temperature().unwrap();
+        celsius = temp.get_celcius(ResolutionVal::Deg_0_0625C);
+        unsafe { uart_send_temp(celsius); }
     }
 }
