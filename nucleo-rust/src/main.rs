@@ -16,13 +16,12 @@ use cortex_m_rt::entry;
 use stm32f1xx_hal::{
     pac::{self, interrupt, USART2},
     prelude::*,
-    serial::{Config, Serial, StopBits, Tx, Rx},
-    i2c::{BlockingI2c, DutyCycle, Mode}, timer::Timer};
-use nb::block;
+    spi::{self, Spi},
+    serial::{Config, Serial, StopBits, Tx, Rx}};
 use core::fmt::Write;
 use heapless::Vec;
 use command::{Command, RxState};
-use mcp9808::{MCP9808, reg_res::ResolutionVal, reg_temp_generic::ReadableTempRegister};
+use lcd_hal::{Display, pcd8544::spi::Pcd8544Spi};
 
 static mut RX: Option<Rx<USART2>> = None;
 static mut TX: Option<Tx<USART2>> = None;
@@ -36,12 +35,6 @@ unsafe fn uart_command_response(command: &Command) {
         for i in 0..command.args.len() {
             writeln!(tx, "Argument {} is {}\r", i, command.args[i]).unwrap();
         }
-    }
-}
-
-unsafe fn uart_send_temp(temp: f32) {
-    if let Some(tx) = TX.as_mut() {
-        writeln!(tx, "Temperature is {}", temp).unwrap();
     }
 }
 
@@ -99,10 +92,41 @@ fn main() -> ! {
     let mut flash = dp.FLASH.constrain();
     let rcc = dp.RCC.constrain();
     let mut afio = dp.AFIO.constrain();
-    let clocks = rcc.cfgr.use_hse(8.MHz()).freeze(&mut flash.acr);
+    let clocks = rcc
+        .cfgr
+        .use_hse(8.MHz())
+        .sysclk(72.MHz())
+        .pclk1(36.MHz())
+        .freeze(&mut flash.acr);
 
     let mut gpioa = dp.GPIOA.split();
     let mut gpiob = dp.GPIOB.split();
+    let mut gpioc = dp.GPIOC.split();
+
+    let sck = gpiob.pb13.into_alternate_push_pull(&mut gpiob.crh);
+    let mosi = gpiob.pb15.into_alternate_push_pull(&mut gpiob.crh);
+    let miso = gpiob.pb14.into_floating_input(&mut gpiob.crh);
+
+    let spi_mode = spi::Mode {
+        phase: spi::Phase::CaptureOnFirstTransition,
+        polarity: spi::Polarity::IdleLow,
+    };
+    let spi = Spi::spi2(
+        dp.SPI2,
+        (sck, miso, mosi),
+        spi_mode,
+        4.MHz(),
+        clocks
+    );
+
+    let mut bl = gpioa.pa10.into_push_pull_output(&mut gpioa.crh);
+    let dc = gpioc.pc7.into_push_pull_output(&mut gpioc.crl);
+    let cs = gpiob.pb10.into_push_pull_output(&mut gpiob.crh);
+    let mut rst = gpioa.pa8.into_push_pull_output(&mut gpioa.crh);
+
+    let mut delay = cp.SYST.delay(&clocks);
+
+    bl.set_high();
 
     let tx_pin = gpioa.pa2.into_alternate_push_pull(&mut gpioa.crl);
     let rx_pin = gpioa.pa3;
@@ -114,27 +138,17 @@ fn main() -> ! {
         &clocks
     );
 
-    let scl_pin = gpiob.pb8.into_alternate_open_drain(&mut gpiob.crh);
-    let sda_pin = gpiob.pb9.into_alternate_open_drain(&mut gpiob.crh);
-    let _alert_pin = gpioa.pa9;
-    let i2c = BlockingI2c::i2c1(
-        dp.I2C1,
-        (scl_pin, sda_pin),
-        &mut afio.mapr,
-        Mode::Fast {
-            frequency: 400.kHz(),
-            duty_cycle: DutyCycle::Ratio16to9,
-        },
-        clocks,
-        1000,
-        10,
-        1000,
-        1000
-    );
-
     serial.tx.listen();
     serial.rx.listen();
     serial.rx.listen_idle();
+
+    let mut display = Pcd8544Spi::new(spi, dc, cs, &mut rst, &mut delay).unwrap();
+
+    let res = display.print(b"Hello world");
+    match res {
+        Ok(_) => writeln!(serial.tx, "Write performed\r\n").unwrap(),
+        Err(_) => writeln!(serial.tx, "Write failed\r\n").unwrap()
+    };
 
     writeln!(serial.tx, "Please type command |len||cmd||args..|:\r\n").unwrap();
 
@@ -146,18 +160,7 @@ fn main() -> ! {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
 
-    let mut timer = Timer::syst(cp.SYST, &clocks).counter_hz();
-    timer.start(1.Hz()).unwrap();
-
-    let mut mcp9808 = MCP9808::new(i2c);
-    let mut temp = mcp9808.read_temperature().unwrap();
-    let mut celsius = temp.get_celcius(ResolutionVal::Deg_0_0625C);
-    unsafe { uart_send_temp(celsius); }
-
     loop {
-        block!(timer.wait()).unwrap();
-        temp = mcp9808.read_temperature().unwrap();
-        celsius = temp.get_celcius(ResolutionVal::Deg_0_0625C);
-        unsafe { uart_send_temp(celsius); }
+        cortex_m::asm::wfi()
     }
 }

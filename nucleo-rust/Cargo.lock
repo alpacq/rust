@@ -241,6 +241,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcd-hal"
+version = "0.5.0"
+dependencies = [
+ "embedded-hal",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -285,6 +292,7 @@ dependencies = [
  "cortex-m-semihosting",
  "embedded-hal",
  "heapless",
+ "lcd-hal",
  "mcp9808",
  "nb 1.1.0",
  "panic-halt",
