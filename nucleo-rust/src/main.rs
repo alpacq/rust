@@ -14,9 +14,10 @@ mod command;
 use panic_halt as _;
 use cortex_m_rt::entry;
 use stm32f1xx_hal::{
-    pac::{self, interrupt, USART2},
+    pac::{self, interrupt, USART2, SPI2},
     prelude::*,
-    spi::{self, Spi},
+    gpio::{Pin, Output, Alternate},
+    spi::{self, Spi, Spi2NoRemap},
     serial::{Config, Serial, StopBits, Tx, Rx}};
 use core::fmt::Write;
 use heapless::Vec;
@@ -27,14 +28,44 @@ static mut RX: Option<Rx<USART2>> = None;
 static mut TX: Option<Tx<USART2>> = None;
 static mut CURRENT_COMMAND: Command = Command { len: 1, cmd: 0, args: Vec::new() };
 static mut RX_STATE: RxState = RxState::Length;
+static mut DISPLAY: Option<Pcd8544Spi<Spi<SPI2, Spi2NoRemap, (Pin<'B', 13, Alternate>, Pin<'B', 14>, Pin<'B', 15, Alternate>), u8>, Pin<'C', 7, Output>, Pin<'B', 10, Output>>> = None;
+static mut LIGHT: Option<Pin<'A', 10, Output>> = None;
 
-unsafe fn uart_command_response(command: &Command) {
+unsafe fn uart_command_response() {
     if let Some(tx) = TX.as_mut() {
-        writeln!(tx, "Length of cmd is {}\r", command.len).unwrap();
-        writeln!(tx, "Command code is {}\r", command.cmd).unwrap();
-        for i in 0..command.args.len() {
-            writeln!(tx, "Argument {} is {}\r", i, command.args[i]).unwrap();
+        writeln!(tx, "Length of cmd is {}\r", CURRENT_COMMAND.len).unwrap();
+        writeln!(tx, "Command code is {}\r", CURRENT_COMMAND.cmd).unwrap();
+        for i in 0..CURRENT_COMMAND.args.len() {
+            writeln!(tx, "Argument {} is {}\r", i, CURRENT_COMMAND.args[i]).unwrap();
         }
+    }
+}
+
+unsafe fn execute_command() {
+    match CURRENT_COMMAND.cmd {
+        107 => { //K
+            if let Some(display) = DISPLAY.as_mut() {
+                display.clear().unwrap();
+                let res = display.print(b"Hello Kris");
+                if let Some(tx) = TX.as_mut() {
+                    match res {
+                        Ok(_) => writeln!(tx, "Write performed\r\n").unwrap(),
+                        Err(_) => writeln!(tx, "Write failed\r\n").unwrap()
+                    };
+                }
+            }
+        }
+        108 => { //L
+            if let Some(light) = LIGHT.as_mut() {
+                light.set_high();
+            }
+        }
+        115 => { //S
+            if let Some(light) = LIGHT.as_mut() {
+                light.set_low();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -71,7 +102,8 @@ unsafe fn USART2() {
                             if *idx == command.len {
                                 command.copy(&mut CURRENT_COMMAND);
                                 RX_STATE = RxState::Length;
-                                uart_command_response(&CURRENT_COMMAND);
+                                execute_command();
+                                uart_command_response();
                             }
                         }
                     }
@@ -106,6 +138,7 @@ fn main() -> ! {
     let sck = gpiob.pb13.into_alternate_push_pull(&mut gpiob.crh);
     let mosi = gpiob.pb15.into_alternate_push_pull(&mut gpiob.crh);
     let miso = gpiob.pb14.into_floating_input(&mut gpiob.crh);
+    let cs = gpiob.pb10.into_push_pull_output(&mut gpiob.crh);
 
     let spi_mode = spi::Mode {
         phase: spi::Phase::CaptureOnFirstTransition,
@@ -121,7 +154,6 @@ fn main() -> ! {
 
     let mut bl = gpioa.pa10.into_push_pull_output(&mut gpioa.crh);
     let dc = gpioc.pc7.into_push_pull_output(&mut gpioc.crl);
-    let cs = gpiob.pb10.into_push_pull_output(&mut gpiob.crh);
     let mut rst = gpioa.pa8.into_push_pull_output(&mut gpioa.crh);
 
     let mut delay = cp.SYST.delay(&clocks);
@@ -155,6 +187,8 @@ fn main() -> ! {
     cortex_m::interrupt::free(|_| unsafe {
         TX.replace(serial.tx);
         RX.replace(serial.rx);
+        DISPLAY.replace(display);
+        LIGHT.replace(bl);
     });
     unsafe {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);

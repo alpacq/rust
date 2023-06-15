@@ -1,7 +1,6 @@
 #![deny(unsafe_code)]
 #![no_std]
 
-// TODO: feature flags?
 pub mod font;
 pub mod hx1230;
 pub mod pcd8544;
