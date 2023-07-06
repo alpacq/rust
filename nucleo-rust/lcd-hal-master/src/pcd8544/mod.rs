@@ -40,8 +40,8 @@ impl<T: Pcd8544Base> Display for T {
     /// x must be 0..83
     /// y must be 0..5
     fn set_position(&mut self, x: u8, y: u8) -> Result<(), Self::Error> {
-        assert!(x < 84);
-        assert!(y < 6);
+        // assert!(x < 84);
+        // assert!(y < 6);
         //self.command(0b0010_0000); // vertical_addressing = false
         self.command(0b0100_0000 | y)?;
         self.command(0b1000_0000 | x)

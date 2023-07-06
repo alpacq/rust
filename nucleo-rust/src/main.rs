@@ -20,9 +20,10 @@ use stm32f1xx_hal::{
     spi::{self, Spi, Spi2NoRemap},
     serial::{Config, Serial, StopBits, Tx, Rx}};
 use core::fmt::Write;
-use heapless::Vec;
+use heapless::{Vec, String};
 use command::{Command, RxState};
 use lcd_hal::{Display, pcd8544::spi::Pcd8544Spi};
+use dht11::{Dht11, Measurement};
 
 static mut RX: Option<Rx<USART2>> = None;
 static mut TX: Option<Tx<USART2>> = None;
@@ -30,6 +31,7 @@ static mut CURRENT_COMMAND: Command = Command { len: 1, cmd: 0, args: Vec::new()
 static mut RX_STATE: RxState = RxState::Length;
 static mut DISPLAY: Option<Pcd8544Spi<Spi<SPI2, Spi2NoRemap, (Pin<'B', 13, Alternate>, Pin<'B', 14>, Pin<'B', 15, Alternate>), u8>, Pin<'C', 7, Output>, Pin<'B', 10, Output>>> = None;
 static mut LIGHT: Option<Pin<'A', 10, Output>> = None;
+static mut MEASUREMENT: Option<Measurement> = None;
 
 unsafe fn uart_command_response() {
     if let Some(tx) = TX.as_mut() {
@@ -43,26 +45,76 @@ unsafe fn uart_command_response() {
 
 unsafe fn execute_command() {
     match CURRENT_COMMAND.cmd {
-        107 => { //K
-            if let Some(display) = DISPLAY.as_mut() {
-                display.clear().unwrap();
-                let res = display.print(b"Hello Kris");
-                if let Some(tx) = TX.as_mut() {
-                    match res {
-                        Ok(_) => writeln!(tx, "Write performed\r\n").unwrap(),
-                        Err(_) => writeln!(tx, "Write failed\r\n").unwrap()
-                    };
+        104 => { //h => read humidity
+            if let Some(measurement) = MEASUREMENT.as_mut() {
+                let hum_full: String<2> = String::from(measurement.humidity / 10);
+                let hum_frac: String<1> = String::from(measurement.humidity % 10);
+                if let Some(display) = DISPLAY.as_mut() {
+                    display.clear().unwrap();
+                    let _res = display.print(b"Humidity: ").unwrap();
+                    let _res = display.set_position(0u8, 1u8).unwrap();
+                    let _res = display.print(hum_full.as_bytes()).unwrap();
+                    let _res = display.print(b".").unwrap();
+                    let _res = display.print(hum_frac.as_bytes()).unwrap();
+                    let _res = display.print(b"%").unwrap();
                 }
             }
         }
-        108 => { //L
+        107 => { //k => changes displayed string
+            if let Some(display) = DISPLAY.as_mut() {
+                display.clear().unwrap();
+                let _res = display.print(b"Hello Kris").unwrap();
+            }
+        }
+        108 => { //l => turn on display's BL
             if let Some(light) = LIGHT.as_mut() {
                 light.set_high();
             }
         }
-        115 => { //S
+        114 => { //r => read measurements, [g,h,t]
+            if let Some(tx) = TX.as_mut() {
+                for i in 0..CURRENT_COMMAND.args.len() {
+                    match CURRENT_COMMAND.args[i] {
+                        103 => { //g
+                            writeln!(tx, "Gas sensor reading is -\r").unwrap();
+                        }
+                        104 => { //h
+                            if let Some(measurement) = MEASUREMENT.as_mut() {
+                                let hum_full: String<2> = String::from(measurement.humidity / 10);
+                                let hum_frac: String<1> = String::from(measurement.humidity % 10);
+                                writeln!(tx, "Humidity is {}.{}%\r", hum_full, hum_frac).unwrap();
+                            }
+                        }
+                        116 => { //t
+                            if let Some(measurement) = MEASUREMENT.as_mut() {
+                                let temp_full: String<2> = String::from(measurement.temperature / 10);
+                                let temp_frac: String<1> = String::from(measurement.temperature % 10);
+                                writeln!(tx, "Humidity is {}.{}oC\r", temp_full, temp_frac).unwrap();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        115 => { //s => turn off display's BL
             if let Some(light) = LIGHT.as_mut() {
                 light.set_low();
+            }
+        }
+        116 => { //t => read temperature
+            if let Some(measurement) = MEASUREMENT.as_mut() {
+                let temp_full: String<2> = String::from(measurement.temperature / 10);
+                let temp_frac: String<1> = String::from(measurement.temperature % 10);
+                if let Some(display) = DISPLAY.as_mut() {
+                    display.clear().unwrap();
+                    let _res = display.print(b"Temperature: ").unwrap();
+                    let _res = display.set_position(0u8, 1u8).unwrap();
+                    let _res = display.print(temp_full.as_bytes()).unwrap();
+                    let _res = display.print(b".").unwrap();
+                    let _res = display.print(temp_frac.as_bytes()).unwrap();
+                    let _res = display.print(b"oC").unwrap();
+                }
             }
         }
         _ => {}
@@ -182,6 +234,17 @@ fn main() -> ! {
         Err(_) => writeln!(serial.tx, "Write failed\r\n").unwrap()
     };
 
+    let dht11_pin = gpiob.pb2.into_open_drain_output(&mut gpiob.crl);
+
+    let mut dht11 = Dht11::new(dht11_pin);
+
+    let mut measurement = Measurement {temperature: 0i16, humidity: 0u16};
+
+    match dht11.perform_measurement(&mut delay) {
+        Ok(msrmt) => measurement = msrmt,
+        Err(e) => writeln!(serial.tx, "Error: {:?}\r\n", e).unwrap(),
+    };
+
     writeln!(serial.tx, "Please type command |len||cmd||args..|:\r\n").unwrap();
 
     cortex_m::interrupt::free(|_| unsafe {
@@ -189,12 +252,26 @@ fn main() -> ! {
         RX.replace(serial.rx);
         DISPLAY.replace(display);
         LIGHT.replace(bl);
+        MEASUREMENT.replace(measurement);
     });
     unsafe {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
 
     loop {
-        cortex_m::asm::wfi()
+        unsafe {
+            match dht11.perform_measurement(&mut delay) {
+                Ok(msrmt) => {
+                    if let Some(meas) = MEASUREMENT.as_mut() {
+                        *meas = msrmt;
+                    }
+                }
+                Err(e) => {
+                    if let Some(serial_tx) = TX.as_mut() {
+                        writeln!(serial_tx, "Error: {:?}\r\n", e).unwrap();
+                    }
+                }
+            }
+        }
     }
 }
