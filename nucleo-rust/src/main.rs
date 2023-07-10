@@ -1,10 +1,3 @@
-//! Blinks an LED
-//!
-//! This assumes that a LED is connected to pc13 as is the case on the blue pill board.
-//!
-//! Note: Without additional hardware, PC13 should not be used to drive an LED, see page 5.1.2 of
-//! the reference manual for an explanation. This is not an issue on the blue pill.
-
 //#![deny(unsafe_code)]
 #![no_std]
 #![no_main]
@@ -89,7 +82,7 @@ unsafe fn execute_command() {
                             if let Some(measurement) = MEASUREMENT.as_mut() {
                                 let temp_full: String<2> = String::from(measurement.temperature / 10);
                                 let temp_frac: String<1> = String::from(measurement.temperature % 10);
-                                writeln!(tx, "Humidity is {}.{}oC\r", temp_full, temp_frac).unwrap();
+                                writeln!(tx, "Temperature is {}.{}oC\r", temp_full, temp_frac).unwrap();
                             }
                         }
                         _ => {}
@@ -171,11 +164,14 @@ unsafe fn USART2() {
 
 #[entry]
 fn main() -> ! {
+    //basic structures
     let cp = cortex_m::Peripherals::take().unwrap();
     let dp = pac::Peripherals::take().unwrap();
     let mut flash = dp.FLASH.constrain();
     let rcc = dp.RCC.constrain();
     let mut afio = dp.AFIO.constrain();
+
+    //clock configuration
     let clocks = rcc
         .cfgr
         .use_hse(8.MHz())
@@ -183,10 +179,17 @@ fn main() -> ! {
         .pclk1(36.MHz())
         .freeze(&mut flash.acr);
 
+    //GPIO banks
     let mut gpioa = dp.GPIOA.split();
     let mut gpiob = dp.GPIOB.split();
     let mut gpioc = dp.GPIOC.split();
 
+    let mut delay = cp.SYST.delay(&clocks);
+
+    //timer configuration
+    let mut timer = dp.TIM2.counter_hz(&clocks);
+
+    //SPI configuration & LCD display pins
     let sck = gpiob.pb13.into_alternate_push_pull(&mut gpiob.crh);
     let mosi = gpiob.pb15.into_alternate_push_pull(&mut gpiob.crh);
     let miso = gpiob.pb14.into_floating_input(&mut gpiob.crh);
@@ -208,10 +211,9 @@ fn main() -> ! {
     let dc = gpioc.pc7.into_push_pull_output(&mut gpioc.crl);
     let mut rst = gpioa.pa8.into_push_pull_output(&mut gpioa.crh);
 
-    let mut delay = cp.SYST.delay(&clocks);
-
     bl.set_high();
 
+    //UART configuration
     let tx_pin = gpioa.pa2.into_alternate_push_pull(&mut gpioa.crl);
     let rx_pin = gpioa.pa3;
     let mut serial = Serial::new(
@@ -226,6 +228,7 @@ fn main() -> ! {
     serial.rx.listen();
     serial.rx.listen_idle();
 
+    //LCD display creation & test
     let mut display = Pcd8544Spi::new(spi, dc, cs, &mut rst, &mut delay).unwrap();
 
     let res = display.print(b"Hello world");
@@ -234,6 +237,7 @@ fn main() -> ! {
         Err(_) => writeln!(serial.tx, "Write failed\r\n").unwrap()
     };
 
+    //DHT11 humidity & temperature sensor configuration
     let dht11_pin = gpiob.pb2.into_open_drain_output(&mut gpiob.crl);
 
     let mut dht11 = Dht11::new(dht11_pin);
@@ -247,6 +251,12 @@ fn main() -> ! {
 
     writeln!(serial.tx, "Please type command |len||cmd||args..|:\r\n").unwrap();
 
+    //start timer
+    timer.start(1.Hz()).unwrap();
+
+    writeln!(serial.tx, "Timer started\r\n").unwrap();
+
+    //static global variables write
     cortex_m::interrupt::free(|_| unsafe {
         TX.replace(serial.tx);
         RX.replace(serial.rx);
@@ -254,11 +264,20 @@ fn main() -> ! {
         LIGHT.replace(bl);
         MEASUREMENT.replace(measurement);
     });
+
+    //enable interrupts
     unsafe {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
 
+    unsafe {
+        if let Some(serial_tx) = TX.as_mut() {
+            writeln!(serial_tx, "Interrupts enabled\r\n").unwrap();
+        }
+    }
+
     loop {
+        timer.wait().unwrap();
         unsafe {
             match dht11.perform_measurement(&mut delay) {
                 Ok(msrmt) => {
@@ -271,7 +290,7 @@ fn main() -> ! {
                         writeln!(serial_tx, "Error: {:?}\r\n", e).unwrap();
                     }
                 }
-            }
+            };
         }
     }
 }
