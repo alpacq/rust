@@ -14,13 +14,13 @@ use stm32f1xx_hal::{
     serial::{Config, Serial, StopBits, Tx, Rx}};
 use core::fmt::Write;
 use heapless::{Vec, String};
-use command::{Command, RxState};
+use command::{Command, RxState, CommandCodes};
 use lcd_hal::{Display, pcd8544::spi::Pcd8544Spi};
 use dht11::{Dht11, Measurement};
 
 static mut RX: Option<Rx<USART2>> = None;
 static mut TX: Option<Tx<USART2>> = None;
-static mut CURRENT_COMMAND: Command = Command { len: 1, cmd: 0, args: Vec::new() };
+static mut CURRENT_COMMAND: Command = Command { len: 1, cmd: CommandCodes::NoCommand, args: Vec::new() };
 static mut RX_STATE: RxState = RxState::Length;
 static mut DISPLAY: Option<Pcd8544Spi<Spi<SPI2, Spi2NoRemap, (Pin<'B', 13, Alternate>, Pin<'B', 14>, Pin<'B', 15, Alternate>), u8>, Pin<'C', 7, Output>, Pin<'B', 10, Output>>> = None;
 static mut LIGHT: Option<Pin<'A', 10, Output>> = None;
@@ -29,7 +29,7 @@ static mut MEASUREMENT: Option<Measurement> = None;
 unsafe fn uart_command_response() {
     if let Some(tx) = TX.as_mut() {
         writeln!(tx, "Length of cmd is {}\r", CURRENT_COMMAND.len).unwrap();
-        writeln!(tx, "Command code is {}\r", CURRENT_COMMAND.cmd).unwrap();
+        writeln!(tx, "Command code is {}\r", (CURRENT_COMMAND.cmd as u8)).unwrap();
         for i in 0..CURRENT_COMMAND.args.len() {
             writeln!(tx, "Argument {} is {}\r", i, CURRENT_COMMAND.args[i]).unwrap();
         }
@@ -38,7 +38,7 @@ unsafe fn uart_command_response() {
 
 unsafe fn execute_command() {
     match CURRENT_COMMAND.cmd {
-        104 => { //h => read humidity
+        CommandCodes::DisplayHumidity => { //h => read humidity
             if let Some(measurement) = MEASUREMENT.as_mut() {
                 let hum_full: String<2> = String::from(measurement.humidity / 10);
                 let hum_frac: String<1> = String::from(measurement.humidity % 10);
@@ -53,18 +53,18 @@ unsafe fn execute_command() {
                 }
             }
         }
-        107 => { //k => changes displayed string
+        CommandCodes::DisplayKris => { //k => changes displayed string
             if let Some(display) = DISPLAY.as_mut() {
                 display.clear().unwrap();
                 let _res = display.print(b"Hello Kris").unwrap();
             }
         }
-        108 => { //l => turn on display's BL
+        CommandCodes::DisplayLightOn => { //l => turn on display's BL
             if let Some(light) = LIGHT.as_mut() {
                 light.set_high();
             }
         }
-        114 => { //r => read measurements, [g,h,t]
+        CommandCodes::ReadSensors => { //r => read measurements, [g,h,t]
             if let Some(tx) = TX.as_mut() {
                 for i in 0..CURRENT_COMMAND.args.len() {
                     match CURRENT_COMMAND.args[i] {
@@ -90,12 +90,12 @@ unsafe fn execute_command() {
                 }
             }
         }
-        115 => { //s => turn off display's BL
+        CommandCodes::DisplayLightOff => { //s => turn off display's BL
             if let Some(light) = LIGHT.as_mut() {
                 light.set_low();
             }
         }
-        116 => { //t => read temperature
+        CommandCodes::DisplayTemperature => { //t => read temperature
             if let Some(measurement) = MEASUREMENT.as_mut() {
                 let temp_full: String<2> = String::from(measurement.temperature / 10);
                 let temp_frac: String<1> = String::from(measurement.temperature % 10);
@@ -139,7 +139,15 @@ unsafe fn USART2() {
 
                         RxState::Data { ref mut command, ref mut idx } => {
                             if *idx == 0 {
-                                command.cmd = received as u8;
+                                match received {
+                                    104 => command.cmd = CommandCodes::DisplayHumidity,
+                                    107 => command.cmd = CommandCodes::DisplayKris,
+                                    108 => command.cmd = CommandCodes::DisplayLightOn,
+                                    114 => command.cmd = CommandCodes::ReadSensors,
+                                    115 => command.cmd = CommandCodes::DisplayLightOff,
+                                    116 => command.cmd = CommandCodes::DisplayTemperature,
+                                    _ => command.cmd = CommandCodes::NoCommand
+                                }
                             } else {
                                 command.args.push(received as u8).unwrap();
                             }
