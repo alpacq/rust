@@ -25,6 +25,7 @@ static mut RX_STATE: RxState = RxState::Length;
 static mut DISPLAY: Option<Pcd8544Spi<Spi<SPI2, Spi2NoRemap, (Pin<'B', 13, Alternate>, Pin<'B', 14>, Pin<'B', 15, Alternate>), u8>, Pin<'C', 7, Output>, Pin<'B', 10, Output>>> = None;
 static mut LIGHT: Option<Pin<'A', 10, Output>> = None;
 static mut MEASUREMENT: Option<Measurement> = None;
+static DEBUG_MODE: bool = false;
 
 unsafe fn uart_command_response() {
     if let Some(tx) = TX.as_mut() {
@@ -156,7 +157,9 @@ unsafe fn USART2() {
                                 command.copy(&mut CURRENT_COMMAND);
                                 RX_STATE = RxState::Length;
                                 execute_command();
-                                uart_command_response();
+                                if DEBUG_MODE {
+                                    uart_command_response();
+                                }
                             }
                         }
                     }
