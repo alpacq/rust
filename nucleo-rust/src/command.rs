@@ -33,6 +33,7 @@ impl Command {
 #[derive(Copy, Clone)]
 pub enum CommandCodes {
     NoCommand = 0,
+    DisplayGas = 103,
     DisplayHumidity = 104,
     DisplayKris = 107,
     DisplayLightOn = 108,
